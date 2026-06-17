@@ -161,15 +161,22 @@ public class URDFBuilder : MonoBehaviour
         link.transform.SetParent(parent?.transform ?? null);
 
         // A link can carry several <visual>/<collision> elements; build one child per element.
-        foreach (var visual in linkData.visuals)
+        for (var i = 0; i < linkData.visuals.Count; i++)
         {
+            var visual = linkData.visuals[i];
             var visuals = new GameObject("visual").transform;
             visuals.SetParent(link.transform);
             visuals.localPosition = visual.origin?.xyzRUF ?? Vector3.zero;
             visuals.localRotation = visual.origin?.rotationRUF ?? Quaternion.identity;
             visuals.localScale = visual.geometry.box?.size ?? Vector3.one;
 
-            UrdfVisualMeshImporter.Create(visuals, visual.geometry);
+            var geometry = UrdfVisualMeshImporter.Create(visuals, visual.geometry);
+
+            if (urdf.HasValue && geometry != null)
+            {
+                var material = UrdfMaterialImporter.Build(urdf.Value, visual.material, $"{linkData.name}_{i}");
+                if (material != null) ApplyMaterial(geometry, material);
+            }
         }
 
         foreach (var collision in linkData.collisions)
@@ -202,6 +209,22 @@ public class URDFBuilder : MonoBehaviour
         if (parent != null) parent.childLinks.Add(link);
 
         return link;
+    }
+
+    /// <summary>
+    /// Assigns the URDF material to every renderer under the visual, overriding any materials the
+    /// mesh file shipped with (a URDF &lt;material&gt; takes precedence per the spec). All submesh
+    /// slots get the same material.
+    /// </summary>
+    private static void ApplyMaterial(GameObject geometry, Material material)
+    {
+        foreach (var renderer in geometry.GetComponentsInChildren<MeshRenderer>(true))
+        {
+            var count = Mathf.Max(1, renderer.sharedMaterials.Length);
+            var mats = new Material[count];
+            for (var m = 0; m < count; m++) mats[m] = material;
+            renderer.sharedMaterials = mats;
+        }
     }
 
 }

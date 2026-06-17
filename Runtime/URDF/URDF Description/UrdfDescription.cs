@@ -16,7 +16,11 @@ public struct UrdfDescription
     public string name;
     public Dictionary<string, UrdfLinkDef> links;
     public Dictionary<string, UrdfJointDef> joints;
+    // Robot-level <material> definitions, keyed by name. Visuals can reference these by name.
+    public Dictionary<string, UrdfMaterialDef> materials;
     public List<UrdfMesh> meshes;
+    // Cached ROS package index, reused to resolve both mesh and texture file references.
+    private RosPackageIndex packages;
 
     public UrdfDescription(string source, string sourcePath = null)
     {
@@ -25,7 +29,9 @@ public struct UrdfDescription
         this.name = "";
         this.links = new Dictionary<string, UrdfLinkDef>();
         this.joints = new Dictionary<string, UrdfJointDef>();
+        this.materials = new Dictionary<string, UrdfMaterialDef>();
         this.meshes = new List<UrdfMesh>();
+        this.packages = null;
         document = new XmlDocument();
 
         Parse();
@@ -50,21 +56,21 @@ public struct UrdfDescription
             }
         }
 
-        var packages = new RosPackageIndex(sourcePath);
+        packages = new RosPackageIndex(sourcePath);
         foreach (var mesh in meshes)
         {
-            mesh.meshPath = ResolveMeshPath(mesh.filename, sourcePath, packages);
+            mesh.meshPath = ResolveAssetPath(mesh.filename, sourcePath, packages);
             if (mesh.meshPath == null)
                 Debug.LogWarning($"[urdf] could not locate mesh '{mesh.filename}'");
         }
     }
 
     /// <summary>
-    /// Resolves a mesh reference to an absolute file path. <c>package://pkg/...</c> URLs go through
-    /// the ROS package index; anything else (or a package that isn't indexed) falls back to walking
-    /// up from the URDF file looking for the path. Returns null if nothing is found.
+    /// Resolves a mesh or texture reference to an absolute file path. <c>package://pkg/...</c> URLs
+    /// go through the ROS package index; anything else (or a package that isn't indexed) falls back
+    /// to walking up from the URDF file looking for the path. Returns null if nothing is found.
     /// </summary>
-    private static string ResolveMeshPath(string filename, string sourcePath, RosPackageIndex packages)
+    private static string ResolveAssetPath(string filename, string sourcePath, RosPackageIndex packages)
     {
         if (string.IsNullOrEmpty(filename)) return null;
 
@@ -96,6 +102,16 @@ public struct UrdfDescription
 
         var linkNodes = robotNode?.SelectNodes("link");
         var jointNodes = robotNode?.SelectNodes("joint");
+        var materialNodes = robotNode?.SelectNodes("material");
+
+        for (int i = 0; i < materialNodes?.Count; i++)
+        {
+            var materialNode = materialNodes[i];
+            if (materialNode == null) continue;
+            var material = new UrdfMaterialDef(materialNode);
+            if (!string.IsNullOrEmpty(material.name))
+                materials[material.name] = material; // indexer: last definition for a name wins
+        }
 
         for (int i = 0; i < linkNodes?.Count; i++)
         {
@@ -112,6 +128,32 @@ public struct UrdfDescription
             var joint = new UrdfJointDef(jointNode);
             joints.Add(joint.name ?? "", joint);
         }
+    }
+
+    /// <summary>
+    /// Resolves the material attached to a visual. A bare <c>&lt;material name="x"/&gt;</c> (no inline
+    /// color or texture) is a reference to a robot-level material, so it is looked up in the table;
+    /// an inline material is returned as-is.
+    /// </summary>
+    public readonly UrdfMaterialDef ResolveMaterial(UrdfMaterialDef visualMaterial)
+    {
+        var isReference = visualMaterial.color == null
+                          && string.IsNullOrEmpty(visualMaterial.texture)
+                          && !string.IsNullOrEmpty(visualMaterial.name);
+
+        if (isReference && materials != null && materials.TryGetValue(visualMaterial.name, out var named))
+            return named;
+
+        return visualMaterial;
+    }
+
+    /// <summary>
+    /// Resolves a material texture reference to an absolute file path, using the same lookup rules as
+    /// mesh references. Returns null if the file cannot be located.
+    /// </summary>
+    public readonly string ResolveTexturePath(string filename)
+    {
+        return ResolveAssetPath(filename, sourcePath, packages);
     }
 
     public UrdfJointDef? GetJointForLink(string linkName)
