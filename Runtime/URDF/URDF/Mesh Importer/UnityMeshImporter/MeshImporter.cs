@@ -34,6 +34,7 @@ using System.IO;
 #if ASSIMP_SUPPORTED
 using Assimp;
 using UrdfToolkit.Vendor;
+using UrdfToolkit.Extensions;
 
 
 #endif
@@ -87,6 +88,9 @@ namespace UrdfToolkit.Urdf.Importer
             }
 
             AssimpContext importer = new AssimpContext();
+            // Keep Collada geometry in the file's native (ROS, Z-up) frame instead of letting Assimp
+            // rotate it into its own Y-up convention. We convert to Unity ourselves per-node.
+            importer.SetConfig(new Assimp.Configs.ColladaIgnoreUpDirectionConfig(true));
             Scene scene = importer.ImportFile(meshPath);
             if (scene == null) 
             {
@@ -181,7 +185,7 @@ namespace UrdfToolkit.Urdf.Importer
                     {
                         foreach (var v in m.Vertices)
                         {
-                            uVertices.Add(new Vector3(-v.X, v.Y, v.Z));
+                            uVertices.Add(new UnityEngine.Vector3(v.X, v.Y, v.Z).Ros2Unity());
                         }
                     }
 
@@ -190,7 +194,7 @@ namespace UrdfToolkit.Urdf.Importer
                     {
                         foreach (var n in m.Normals)
                         {
-                            uNormals.Add(new Vector3(-n.X, n.Y, n.Z));
+                            uNormals.Add(new UnityEngine.Vector3(n.X, n.Y, n.Z).Ros2Unity());
                         }
                     }
 
@@ -262,12 +266,11 @@ namespace UrdfToolkit.Urdf.Importer
                 Assimp.Vector3D aTranslation = new Assimp.Vector3D();
                 node.Transform.Decompose(out aScale, out aQuat, out aTranslation);
 
-                // Convert Assimp transfrom into Unity transform and set transformation of game object 
-                UnityEngine.Quaternion uQuat = new UnityEngine.Quaternion(aQuat.X, aQuat.Y, aQuat.Z, aQuat.W);
-                var euler = uQuat.eulerAngles;
-                uOb.transform.localScale = new UnityEngine.Vector3(aScale.X, aScale.Y, aScale.Z);
-                uOb.transform.localPosition = new UnityEngine.Vector3(aTranslation.X, aTranslation.Y, aTranslation.Z);
-                uOb.transform.localRotation = UnityEngine.Quaternion.Euler(euler.x, -euler.y, euler.z);
+                // Convert each component to Unity's frame with the SAME basis change used for the
+                // vertices above, for link/joint origins, and by the STL loader (Ros2Unity)
+                uOb.transform.localScale = new UnityEngine.Vector3(aScale.X, aScale.Y, aScale.Z).Ros2UnityScale();
+                uOb.transform.localPosition = new UnityEngine.Vector3(aTranslation.X, aTranslation.Y, aTranslation.Z).Ros2Unity();
+                uOb.transform.localRotation = new UnityEngine.Quaternion(aQuat.X, aQuat.Y, aQuat.Z, aQuat.W).Ros2Unity();
             
                 if (node.HasChildren)
                 {

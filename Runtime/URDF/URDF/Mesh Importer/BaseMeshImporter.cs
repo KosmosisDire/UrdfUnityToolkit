@@ -34,12 +34,9 @@ public class BaseMeshImporter
             }
             else if (lower.EndsWith(".dae"))
             {
+                // Collada is imported in its native (ROS, Z-up) frame, is later be converted to Unity's frame
                 float globalScale = ColladaAssetPostProcessor.ReadGlobalScale(meshPath);
                 meshObject = MeshImporter.Load(meshPath, globalScale, globalScale, globalScale);
-                if (meshObject != null)
-                {
-                    ColladaAssetPostProcessor.ApplyColladaOrientation(meshObject, meshPath);
-                }
             }
             else if (lower.EndsWith(".obj"))
             {
