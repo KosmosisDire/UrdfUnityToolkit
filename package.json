@@ -1,6 +1,6 @@
 {
   "name": "com.kosmosisdire.urdftoolkit",
-  "version": "0.0.1-preview",
+  "version": "0.0.2-preview",
   "displayName": "URDF Toolkit",
   "description": "A self-contained toolkit for importing URDF/SRDF robot descriptions and converting Xacro files in Unity.",
   "unity": "2023.1",

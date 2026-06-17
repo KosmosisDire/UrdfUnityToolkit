@@ -58,6 +58,32 @@ public class URDFImporterExtension
         File.Delete(outputPath);
     }
 
+    [MenuItem("Assets/Convert this .xacro to .urdf", true)]
+    public static bool ConvertXACROValid()
+    {
+        string assetPath = AssetDatabase.GetAssetPath(Selection.activeObject);
+
+        return Path.GetExtension(assetPath)?.ToLower() == ".xacro";
+    }
+
+    [MenuItem("Assets/Convert this .xacro to .urdf")]
+    public static void ConvertXACRO()
+    {
+        string assetPath = AssetDatabase.GetAssetPath(Selection.activeObject);
+
+        if (Path.GetExtension(assetPath)?.ToLower() != ".xacro")
+        {
+            EditorUtility.DisplayDialog("Xacro Convert", "The file you selected was not a .xacro file. Please select a valid .xacro file.", "Ok");
+            return;
+        }
+
+        var outputDir = Path.GetDirectoryName(assetPath);
+        var outputPath = Path.Combine(outputDir, Path.GetFileNameWithoutExtension(assetPath) + ".urdf");
+        new XacroConverter(assetPath, outputPath).Convert();
+
+        AssetDatabase.Refresh();
+    }
+
     [MenuItem("Assets/Clean URDF Assets", true)]
     private static bool CleanAssetsCheck()
     {
