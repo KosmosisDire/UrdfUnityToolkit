@@ -66,6 +66,13 @@ namespace UrdfToolkit.Urdf
         [SerializeField, HideInInspector] protected Vector3 originPosition = Vector3.zero;
         [SerializeField, HideInInspector] protected Quaternion originRotation = Quaternion.identity;
 
+        // The joint's URDF name (the <joint name="..."> attribute). The component lives on the child
+        // link's GameObject, so gameObject.name is the LINK name; this preserves the actual joint name
+        // for UI such as the joint controller's sliders. Falls back to the GameObject name when unset
+        // (e.g. robots imported before this field existed).
+        [SerializeField, HideInInspector] private string jointName;
+        public string JointName => string.IsNullOrEmpty(jointName) ? name : jointName;
+
         protected virtual void OnEnable()
         {
             // Re-derive the drive backend after deserialization (Play-mode entry, domain reload,
@@ -243,6 +250,8 @@ namespace UrdfToolkit.Urdf
 
         protected virtual void ImportJointData(UrdfJointDef joint)
         {
+            jointName = joint.name;
+
             // Capture the rest pose the builder placed on our transform (the joint <origin>). Joint
             // motion is applied relative to this, so SetPosition(0) leaves the link exactly where the
             // URDF positioned it instead of collapsing it onto the parent.
