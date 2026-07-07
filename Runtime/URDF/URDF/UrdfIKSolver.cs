@@ -13,6 +13,7 @@ public class UrdfIKSolver : MonoBehaviour
     [SerializeField] private int maxIterations = 50;
     [SerializeField] private float positionTolerance = 0.001f;
     [SerializeField] private float rotationTolerance = 0.01f;
+    [SerializeField] private float jointTolerance = 0.01f; // joint-space constraint tolerance
     [SerializeField] private float dampingLambda = 0.1f; // Increased for stability
     [SerializeField] private float stepSize = 0.3f; // Reduced for smoother convergence
     
@@ -27,6 +28,8 @@ public class UrdfIKSolver : MonoBehaviour
     [SerializeField] private bool useWarmStart = true; // Use last solution as starting point
     [SerializeField] private int refinementIterations = 5; // Fewer iterations when close to solution
     [SerializeField] private float refinementThreshold = 0.01f; // When to switch to refinement mode
+    [SerializeField] private int restartAttempts = 8; // random seeds tried when the smooth solve is stuck
+    [SerializeField] private int restartIterations = 200; // iterations per restart (must descend from far)
     
     private UrdfRobot robot;
     
@@ -42,7 +45,7 @@ public class UrdfIKSolver : MonoBehaviour
         public int iterations;
         public float positionError;
         public float rotationError;
-        
+
         public IKResult(bool success, float[] positions, int iterations, float posError, float rotError)
         {
             this.success = success;
@@ -51,6 +54,22 @@ public class UrdfIKSolver : MonoBehaviour
             this.positionError = posError;
             this.rotationError = rotError;
         }
+    }
+
+    // One weighted IK constraint: cartesian (axis-masked link pose) or joint-space (single joint value).
+    public struct IKConstraintTask
+    {
+        public bool isJoint;
+        // Cartesian
+        public string linkName;
+        public Vector3 position;
+        public Quaternion rotation;
+        public bool px, py, pz, rx, ry, rz; // active task axes
+        public bool localFrame;             // mask axes in the link's frame vs world
+        // Joint space
+        public string jointName;
+        public float jointTarget;
+        public float weight;
     }
     
     void OnEnable()
@@ -83,6 +102,278 @@ public class UrdfIKSolver : MonoBehaviour
         return robot.GetControllableJointChain(endEffectorName)
             .Where(j => j is UrdfJointRevolute || j is UrdfJointPrismatic)
             .ToList();
+    }
+
+    // Union of all joints the tasks touch: cartesian chains plus any directly constrained joint.
+    public List<UrdfJoint> GetCombinedChain(List<IKConstraintTask> tasks)
+    {
+        if (robot == null) robot = GetComponent<UrdfRobot>();
+        var combined = new List<UrdfJoint>();
+        var seen = new HashSet<UrdfJoint>();
+        foreach (var t in tasks)
+        {
+            if (t.isJoint)
+            {
+                var j = ResolveJoint(t.jointName);
+                if (j != null && seen.Add(j)) combined.Add(j);
+            }
+            else
+            {
+                foreach (var j in GetIKChain(t.linkName))
+                    if (seen.Add(j)) combined.Add(j);
+            }
+        }
+        return combined;
+    }
+
+    // Find a controllable joint by its URDF name (falling back to the GameObject name).
+    UrdfJoint ResolveJoint(string name)
+    {
+        if (robot == null || string.IsNullOrEmpty(name)) return null;
+        foreach (var j in robot.joints)
+            if (j != null && (j.JointName == name || j.name == name)) return j;
+        return null;
+    }
+
+    // Shared per-solve setup, reused across seeds.
+    private struct SolveContext
+    {
+        public List<IKConstraintTask> tasks;
+        public List<UrdfJoint>[] chains;   // cartesian chain per task (null for joint tasks)
+        public int[] jointCol;             // joint-task column (-1 otherwise)
+        public Dictionary<UrdfJoint, int> column;
+        public int dof;
+        public float[] lower, upper;
+    }
+
+    private struct SolveAttempt
+    {
+        public float[] q;
+        public bool converged;
+        public bool stalled;        // plateaued at a local minimum (not just unfinished this frame)
+        public float score;         // tolerance-normalized residual (lower is better)
+        public int iterations;
+        public float posErr, rotErr;
+        public IKResult Result() => new IKResult(converged, q, iterations, posErr, rotErr);
+    }
+
+    /// <summary>
+    /// Multi-constraint IK: weighted stacked Jacobian damped least squares over the union of the
+    /// constraints' joints. Cartesian tasks emit their active (optionally link-frame) axes; joint
+    /// tasks emit one row pinning a joint to a value. Constraints may share joints; weights trade off.
+    ///
+    /// Solves from the current pose first (the smooth, nearest solution). If that can't reach the
+    /// target (local minimum / joint lock), it retries from random seeds and takes the converged one
+    /// closest to the current pose. If nothing converges it keeps the smooth best-effort.
+    /// </summary>
+    public IKResult SolveIK(List<IKConstraintTask> tasks)
+    {
+        if (robot == null) robot = GetComponent<UrdfRobot>();
+        if (robot == null || tasks == null || tasks.Count == 0)
+            return new IKResult(false, new float[0], 0, float.MaxValue, float.MaxValue);
+
+        var combined = GetCombinedChain(tasks);
+        int dof = combined.Count;
+        if (dof == 0)
+            return new IKResult(false, new float[0], 0, float.MaxValue, float.MaxValue);
+
+        var column = new Dictionary<UrdfJoint, int>();
+        for (int i = 0; i < dof; i++) column[combined[i]] = i;
+
+        // Per-task data: cartesian chain, or the column of a joint task (-1 if unresolved).
+        var chains = new List<UrdfJoint>[tasks.Count];
+        var jointCol = new int[tasks.Count];
+        for (int k = 0; k < tasks.Count; k++)
+        {
+            if (tasks[k].isJoint)
+            {
+                var j = ResolveJoint(tasks[k].jointName);
+                jointCol[k] = j != null && column.TryGetValue(j, out var ci) ? ci : -1;
+            }
+            else
+            {
+                chains[k] = GetIKChain(tasks[k].linkName);
+                jointCol[k] = -1;
+            }
+        }
+
+        float[] current = combined.Select(j => j.GetPosition()).ToArray();
+        var ctx = new SolveContext
+        {
+            tasks = tasks, chains = chains, jointCol = jointCol, column = column, dof = dof,
+            lower = combined.Select(j => (float)j.LowerLimit).ToArray(),
+            upper = combined.Select(j => (float)j.UpperLimit).ToArray(),
+        };
+
+        // Use the warm solve while it converges or is still progressing; only a stall is joint lock.
+        var warm = RunFromSeed(ctx, current, maxIterations);
+        if (warm.converged || !warm.stalled) return warm.Result();
+
+        // Stalled at a local minimum: random restarts with a bigger budget so they descend from far.
+        SolveAttempt closestConverged = default;
+        float closestDist = float.MaxValue;
+        SolveAttempt bestPartial = warm;
+        for (int r = 0; r < restartAttempts; r++)
+        {
+            var res = RunFromSeed(ctx, RandomSeed(current, ctx.lower, ctx.upper), restartIterations);
+            if (res.converged)
+            {
+                float dist = JointDistanceSq(res.q, current);
+                if (dist < closestDist) { closestDist = dist; closestConverged = res; }
+            }
+            else if (res.score < bestPartial.score) bestPartial = res;
+        }
+
+        if (closestDist < float.MaxValue) return closestConverged.Result();   // a real solution: closest jump
+        if (bestPartial.score < warm.score * 0.5f) return bestPartial.Result(); // escaped to a much better basin
+        return warm.Result();                                                  // nothing better: stay (stable)
+    }
+
+    // One damped-least-squares descent from a given seed configuration.
+    private SolveAttempt RunFromSeed(SolveContext ctx, float[] seed, int maxIters)
+    {
+        const int stallWindow = 5;      // iterations without meaningful gain that mean "stuck"
+        const float improveEps = 0.01f; // min score drop (in tolerances) that counts as progress
+
+        int dof = ctx.dof;
+        float[] q = (float[])seed.Clone();
+        float[] best = (float[])q.Clone();
+        float bestScore = float.MaxValue, bestPos = float.MaxValue, bestRot = 0f;
+        int lastImprove = 0;
+
+        for (int iteration = 0; iteration < maxIters; iteration++)
+        {
+            var rows = new List<float[]>(); // weighted Jacobian rows over the combined dof
+            var errs = new List<float>();   // matching weighted errors
+            float maxPos = 0f, maxRot = 0f, maxJoint = 0f;
+
+            for (int k = 0; k < ctx.tasks.Count; k++)
+            {
+                var t = ctx.tasks[k];
+                if (t.weight <= 0f) continue;
+
+                // Joint-space task: one row, identity at the joint's column.
+                if (t.isJoint)
+                {
+                    int col = ctx.jointCol[k];
+                    if (col < 0) continue;
+                    float ej = t.jointTarget - q[col];
+                    float[] jrow = new float[dof];
+                    jrow[col] = t.weight;
+                    rows.Add(jrow);
+                    errs.Add(t.weight * ej);
+                    maxJoint = Mathf.Max(maxJoint, Mathf.Abs(ej));
+                    continue;
+                }
+
+                var chain = ctx.chains[k];
+                if (chain == null || chain.Count == 0) continue;
+
+                float[] qk = new float[chain.Count];
+                for (int c = 0; c < chain.Count; c++) qk[c] = q[ctx.column[chain[c]]];
+
+                ChainPose pose = EvaluateFK(t.linkName, chain, qk);
+
+                Vector3 ePos = t.position - pose.eePosition;
+                Quaternion rd = t.rotation * Quaternion.Inverse(pose.eeRotation);
+                rd.ToAngleAxis(out float angle, out Vector3 axis);
+                if (angle > 180) angle -= 360;
+                Vector3 eRot = axis * (angle * Mathf.Deg2Rad);
+
+                // Express error and Jacobian rows in the chosen frame (identity for world).
+                Quaternion frameInv = t.localFrame ? Quaternion.Inverse(pose.eeRotation) : Quaternion.identity;
+                Vector3 ePosF = frameInv * ePos;
+                Vector3 eRotF = frameInv * eRot;
+
+                float[,] Jk = ComputeJacobian(chain, pose.jointPos, pose.jointAxis, pose.eePosition, 6);
+                Vector3[] linF = new Vector3[chain.Count];
+                Vector3[] angF = new Vector3[chain.Count];
+                for (int c = 0; c < chain.Count; c++)
+                {
+                    linF[c] = frameInv * new Vector3(Jk[0, c], Jk[1, c], Jk[2, c]);
+                    angF[c] = frameInv * new Vector3(Jk[3, c], Jk[4, c], Jk[5, c]);
+                }
+
+                bool[] active = { t.px, t.py, t.pz, t.rx, t.ry, t.rz };
+                for (int a = 0; a < 6; a++)
+                {
+                    if (!active[a]) continue;
+
+                    float[] rowVec = new float[dof];
+                    for (int c = 0; c < chain.Count; c++)
+                        rowVec[ctx.column[chain[c]]] = t.weight * (a < 3 ? linF[c][a] : angF[c][a - 3]);
+
+                    float e = a < 3 ? ePosF[a] : eRotF[a - 3];
+                    rows.Add(rowVec);
+                    errs.Add(t.weight * e);
+
+                    if (a < 3) maxPos = Mathf.Max(maxPos, Mathf.Abs(e));
+                    else maxRot = Mathf.Max(maxRot, Mathf.Abs(e));
+                }
+            }
+
+            int taskDim = rows.Count;
+            if (taskDim == 0) // nothing active to drive
+                return new SolveAttempt { q = (float[])q.Clone(), converged = true, iterations = iteration };
+
+            float[,] J = new float[taskDim, dof];
+            float[] error = new float[taskDim];
+            for (int r = 0; r < taskDim; r++)
+            {
+                error[r] = errs[r];
+                for (int c = 0; c < dof; c++) J[r, c] = rows[r][c];
+            }
+
+            // Keep the best pose by tolerance-normalized residual (see SolutionScore).
+            float score = maxPos / Mathf.Max(positionTolerance, 1e-6f)
+                        + maxRot / Mathf.Max(rotationTolerance, 1e-6f)
+                        + maxJoint / Mathf.Max(jointTolerance, 1e-6f);
+            if (score < bestScore)
+            {
+                if (score < bestScore - improveEps) lastImprove = iteration;
+                bestScore = score; bestPos = maxPos; bestRot = maxRot; best = (float[])q.Clone();
+            }
+
+            if (maxPos < positionTolerance && maxRot < rotationTolerance && maxJoint < jointTolerance)
+                return new SolveAttempt { q = (float[])q.Clone(), converged = true, iterations = iteration, posErr = maxPos, rotErr = maxRot };
+
+            float damping = dampingLambda;
+            if (EstimateConditionNumber(J, taskDim, dof) > 100) damping *= 10f;
+
+            float[] dq = SolvePseudoInverse(J, error, dof, taskDim, damping);
+            for (int i = 0; i < dof; i++)
+            {
+                q[i] += dq[i] * stepSize;
+                if (useJointLimits) q[i] = Mathf.Clamp(q[i], ctx.lower[i], ctx.upper[i]);
+            }
+        }
+
+        bool stalled = (maxIters - 1 - lastImprove) >= stallWindow;
+        return new SolveAttempt { q = best, converged = false, stalled = stalled, score = bestScore, iterations = maxIters, posErr = bestPos, rotErr = bestRot };
+    }
+
+    // Restart seed: keep most joints near the current pose, fully randomize a few (escapes joint locks).
+    private float[] RandomSeed(float[] current, float[] lower, float[] upper)
+    {
+        float[] seed = new float[current.Length];
+        for (int i = 0; i < seed.Length; i++)
+        {
+            bool finite = !float.IsInfinity(lower[i]) && !float.IsInfinity(upper[i]) && upper[i] > lower[i];
+            float lo = finite ? lower[i] : current[i] - 180f;
+            float hi = finite ? upper[i] : current[i] + 180f;
+            seed[i] = UnityEngine.Random.value < 0.3f
+                ? UnityEngine.Random.Range(lo, hi)
+                : Mathf.Clamp(current[i] + 0.1f * (hi - lo) * UnityEngine.Random.Range(-1f, 1f), lo, hi);
+        }
+        return seed;
+    }
+
+    // Squared joint-space distance, used to pick the restart closest to the current pose.
+    private static float JointDistanceSq(float[] a, float[] b)
+    {
+        float s = 0f;
+        for (int i = 0; i < a.Length && i < b.Length; i++) { float d = a[i] - b[i]; s += d * d; }
+        return s;
     }
 
     /// <summary>
@@ -301,6 +592,7 @@ public class UrdfIKSolver : MonoBehaviour
         int iteration = 0;
         float bestPosError = posError;
         float bestRotError = rotError;
+        float bestScore = SolutionScore(posError, rotError, useRotation);
         float[] bestSolution = (float[])resultPositions.Clone();
         
         for (iteration = 0; iteration < actualMaxIterations; iteration++)
@@ -325,9 +617,11 @@ public class UrdfIKSolver : MonoBehaviour
                 rotError = rotationError.magnitude;
             }
             
-            // Track best solution
-            if (posError < bestPosError || (posError == bestPosError && rotError < bestRotError))
+            // Track the best solution by a combined position+rotation score.
+            float score = SolutionScore(posError, rotError, useRotation);
+            if (score < bestScore)
             {
+                bestScore = score;
                 bestPosError = posError;
                 bestRotError = rotError;
                 bestSolution = (float[])resultPositions.Clone();
@@ -402,6 +696,14 @@ public class UrdfIKSolver : MonoBehaviour
         return new IKResult(false, resultPositions, iteration, bestPosError, bestRotError);
     }
     
+    private float SolutionScore(float posError, float rotError, bool useRotation)
+    {
+        float score = posError / Mathf.Max(positionTolerance, 1e-6f);
+        if (useRotation)
+            score += rotError / Mathf.Max(rotationTolerance, 1e-6f);
+        return score;
+    }
+
     /// <summary>
     /// Estimate condition number of Jacobian for singularity detection
     /// </summary>

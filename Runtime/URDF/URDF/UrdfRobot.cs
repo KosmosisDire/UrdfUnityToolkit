@@ -246,9 +246,21 @@ public class UrdfRobot : MonoBehaviour
         }
     }
 
+    [Button("Setup Joint Control")]
+    public UrdfJointController SetupJointControl()
+    {
+        var controller = GetComponent<UrdfJointController>();
+        if (!controller)
+        {
+            controller = gameObject.AddComponent<UrdfJointController>();
+        }
+        return controller;
+    }
+
     [Button("Setup IK")]
     public void SetupIK()
     {
+        SetupJointControl();
         var solver = GetComponent<UrdfIKSolver>();
         if (!solver)
         {
@@ -260,17 +272,32 @@ public class UrdfRobot : MonoBehaviour
             controller = gameObject.AddComponent<UrdfIKController>();
         }
 
-        // create target at end effector
-        // use the end of the chain by default
-        var endEffector = joints.First(e => e is UrdfJointFixed);
-        if (!endEffector) endEffector = joints.Last();
-        if (endEffector != null)
+        // Default constraint: full pose at the end of the chain, held as an internal stored pose
+        // (no target Transform is created — assign one to the constraint's Target field to drive
+        // it from a scene object instead).
+        var endEffector = joints.FirstOrDefault(e => e is UrdfJointFixed);
+        if (!endEffector && joints.Count > 0) endEffector = joints[joints.Count - 1];
+        if (endEffector != null && !controller.constraints.Any(c => c != null && c.link == endEffector.name))
         {
-            var target = new GameObject("IK Target");
-            target.transform.SetPositionAndRotation(endEffector.transform.position, endEffector.transform.rotation);
-            controller.endEffectorLinkName = endEffector.name;
-            controller.target = target.transform;
+            controller.constraints.Add(new UrdfIKController.IKConstraint
+            {
+                link = endEffector.name,
+                position = endEffector.transform.position,
+                rotation = endEffector.transform.rotation,
+                rotX = true, rotY = true, rotZ = true,
+            });
         }
+    }
+
+    [Button("Add Reach Bubble")]
+    public UrdfReachBubble AddReachBubble()
+    {
+        var bubble = GetComponent<UrdfReachBubble>();
+        if (!bubble)
+        {
+            bubble = gameObject.AddComponent<UrdfReachBubble>();
+        }
+        return bubble;
     }
 
     // Fixed the swapped method names and added validation
