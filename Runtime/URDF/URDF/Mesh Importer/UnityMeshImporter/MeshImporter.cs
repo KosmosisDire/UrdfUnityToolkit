@@ -69,8 +69,11 @@ namespace UrdfToolkit.Urdf.Importer
     
     public class MeshImporter
     {
-        public static GameObject Load(string meshPath, float scaleX=1, float scaleY=1, float scaleZ=1)
+        public static GameObject Load(string meshPath, out bool hasEmbeddedMaterials, float scaleX=1, float scaleY=1, float scaleZ=1)
         {
+            // True when the mesh file ships its own authored materials, so callers can keep them
+            // instead of overriding with the URDF <material>.
+            hasEmbeddedMaterials = false;
 #if ASSIMP_SUPPORTED
             if (!File.Exists(meshPath))
             {
@@ -105,6 +108,8 @@ namespace UrdfToolkit.Urdf.Importer
             {
                 foreach (var m in scene.Materials)
                 {
+                    hasEmbeddedMaterials |= IsAuthoredMaterial(m);
+
                     UnityEngine.Material uMaterial = MaterialExtensions.CreateBasicMaterial();
 
                     // Albedo
@@ -292,6 +297,22 @@ namespace UrdfToolkit.Urdf.Importer
             return null;
 #endif
         }
+
+#if ASSIMP_SUPPORTED
+        // Distinguishes a material the file author actually defined (an .mtl entry, a Collada effect)
+        // from the placeholder Assimp fabricates for material-less files (named AI_DEFAULT_MATERIAL_NAME,
+        // and carrying a default gray diffuse color). A material only counts if it carries a real color
+        // or texture — a bare name is not enough.
+        private static bool IsAuthoredMaterial(Assimp.Material material)
+        {
+            if (material.HasTextureDiffuse) return true;
+
+            var isPlaceholder = !material.HasName
+                || string.IsNullOrEmpty(material.Name)
+                || material.Name == Assimp.Unmanaged.AiDefines.AI_DEFAULT_MATERIAL_NAME;
+            return !isPlaceholder && (material.HasColorDiffuse || material.HasColorEmissive);
+        }
+#endif
     }
 
 }

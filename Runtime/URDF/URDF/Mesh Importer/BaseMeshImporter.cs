@@ -13,10 +13,13 @@ public class BaseMeshImporter
     /// Loads a mesh file into a GameObject hierarchy, dispatching on the file extension
     /// (.stl, .dae, .obj). Returns null and logs an error if the mesh could not be located,
     /// the format is unsupported, or the loader threw. Shared by the visual and collision
-    /// importers so both handle the same set of formats.
+    /// importers so both handle the same set of formats. <paramref name="hasEmbeddedMaterials"/>
+    /// reports whether the file shipped its own authored materials (never for STL).
     /// </summary>
-    public static GameObject CreateMeshGameObjectRuntime(UrdfMesh mesh, Transform parent = null)
+    public static GameObject CreateMeshGameObjectRuntime(UrdfMesh mesh, out bool hasEmbeddedMaterials, Transform parent = null)
     {
+        hasEmbeddedMaterials = false;
+
         if (string.IsNullOrEmpty(mesh.meshPath))
         {
             Debug.LogError($"Unable to load mesh '{mesh.filename}': it could not be located on disk.");
@@ -36,11 +39,11 @@ public class BaseMeshImporter
             {
                 // Collada is imported in its native (ROS, Z-up) frame, is later be converted to Unity's frame
                 float globalScale = ColladaAssetPostProcessor.ReadGlobalScale(meshPath);
-                meshObject = MeshImporter.Load(meshPath, globalScale, globalScale, globalScale);
+                meshObject = MeshImporter.Load(meshPath, out hasEmbeddedMaterials, globalScale, globalScale, globalScale);
             }
             else if (lower.EndsWith(".obj"))
             {
-                meshObject = MeshImporter.Load(meshPath);
+                meshObject = MeshImporter.Load(meshPath, out hasEmbeddedMaterials);
             }
             else
             {

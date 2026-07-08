@@ -6,8 +6,9 @@ namespace UrdfToolkit.Urdf.Importer
 
 public class UrdfVisualMeshImporter : BaseMeshImporter
 {
-    public static GameObject Create(Transform parent, UrdfGeometryDef geometry)
+    public static GameObject Create(Transform parent, UrdfGeometryDef geometry, out bool hasEmbeddedMaterials)
     {
+        hasEmbeddedMaterials = false;
         GameObject geometryGameObject = null;
 
         switch (geometry.type)
@@ -28,7 +29,7 @@ public class UrdfVisualMeshImporter : BaseMeshImporter
                 if (sphereCollider) GameObject.DestroyImmediate(sphereCollider);
                 break;
             case GeometryTypes.Mesh:
-                geometryGameObject = CreateMeshVisual(geometry.mesh, parent);
+                geometryGameObject = CreateMeshVisual(geometry.mesh, out hasEmbeddedMaterials, parent);
                 break;
         }
 
@@ -42,14 +43,14 @@ public class UrdfVisualMeshImporter : BaseMeshImporter
         return geometryGameObject;
     }
 
-    private static GameObject CreateMeshVisual(UrdfMesh mesh, Transform parent = null)
+    private static GameObject CreateMeshVisual(UrdfMesh mesh, out bool hasEmbeddedMaterials, Transform parent = null)
     {
-        return CreateMeshVisualRuntime(mesh, parent);
+        return CreateMeshVisualRuntime(mesh, out hasEmbeddedMaterials, parent);
     }
 
-    private static GameObject CreateMeshVisualRuntime(UrdfMesh mesh, Transform parent = null)
+    private static GameObject CreateMeshVisualRuntime(UrdfMesh mesh, out bool hasEmbeddedMaterials, Transform parent = null)
     {
-        return CreateMeshGameObjectRuntime(mesh, parent);
+        return CreateMeshGameObjectRuntime(mesh, out hasEmbeddedMaterials, parent);
     }
 }
 

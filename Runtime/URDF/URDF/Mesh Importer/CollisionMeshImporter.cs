@@ -49,7 +49,8 @@ namespace UrdfToolkit.Urdf.Importer
 
         private static GameObject CreateMeshColliderRuntime(UrdfMesh mesh, Transform parent = null)
         {
-            GameObject meshObject = CreateMeshGameObjectRuntime(mesh, parent);
+            // Colliders discard renderers/materials, so embedded-material info is irrelevant here.
+            GameObject meshObject = CreateMeshGameObjectRuntime(mesh, out _, parent);
             if (meshObject != null)
             {
                 ConvertMeshToColliders(meshObject);

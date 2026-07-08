@@ -170,9 +170,11 @@ public class URDFBuilder : MonoBehaviour
             visuals.localRotation = visual.origin?.rotationRUF ?? Quaternion.identity;
             visuals.localScale = visual.geometry.box?.size ?? Vector3.one;
 
-            var geometry = UrdfVisualMeshImporter.Create(visuals, visual.geometry);
+            var geometry = UrdfVisualMeshImporter.Create(visuals, visual.geometry, out var hasEmbeddedMaterials);
 
-            if (urdf.HasValue && geometry != null)
+            // A mesh that ships its own materials (an OBJ with an .mtl, or a Collada file) keeps them;
+            // only fall back to the URDF <material> when the mesh brought none.
+            if (urdf.HasValue && geometry != null && !hasEmbeddedMaterials)
             {
                 var material = UrdfMaterialImporter.Build(urdf.Value, visual.material, $"{linkData.name}_{i}");
                 if (material != null) ApplyMaterial(geometry, material);
@@ -212,9 +214,9 @@ public class URDFBuilder : MonoBehaviour
     }
 
     /// <summary>
-    /// Assigns the URDF material to every renderer under the visual, overriding any materials the
-    /// mesh file shipped with (a URDF &lt;material&gt; takes precedence per the spec). All submesh
-    /// slots get the same material.
+    /// Assigns the URDF material to every renderer under the visual. Only called when the mesh file
+    /// brought no authored materials of its own — a file's embedded materials take precedence. All
+    /// submesh slots get the same material.
     /// </summary>
     private static void ApplyMaterial(GameObject geometry, Material material)
     {
