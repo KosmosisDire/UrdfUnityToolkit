@@ -226,6 +226,8 @@ namespace UrdfToolkit.Urdf.Importer
                     }
                 
                     UnityEngine.Mesh uMesh = new UnityEngine.Mesh();
+                    // UInt16 caps a mesh at 65535 vertices, set before assigning vertices so large meshes aren't truncated
+                    uMesh.indexFormat = uVertices.Count > 65535 ? UnityEngine.Rendering.IndexFormat.UInt32 : UnityEngine.Rendering.IndexFormat.UInt16;
                     uMesh.vertices = uVertices.ToArray();
                     uMesh.normals = uNormals.ToArray();
                     uMesh.triangles = uIndices.ToArray();
